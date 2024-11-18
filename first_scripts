@@ -1,0 +1,154 @@
+-- Создание схемы для рабочего пространства
+
+-- Переключение на созданную схему
+SET search_path TO workspace;
+
+-- Создание перечисления для роли юзера
+CREATE TYPE user_role AS ENUM ('admin', 'employee', 'manager');
+
+CREATE TABLE users (
+    user_id SERIAL PRIMARY KEY,
+    username VARCHAR(50) NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    role user_role DEFAULT 'employee' -- Использование перечисления
+);
+
+CREATE TABLE permissions (
+    permission_id SERIAL PRIMARY KEY,
+    permission_name VARCHAR(50) NOT NULL
+);
+
+CREATE TABLE file_types (
+    file_type_id SERIAL PRIMARY KEY,
+    type_name VARCHAR(50) NOT NULL
+);
+
+CREATE TABLE limits (
+    limit_id SERIAL PRIMARY KEY,
+    user_id INT,
+    file_limit INT,
+    storage_limit INT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE folders (
+    folder_id SERIAL PRIMARY KEY,
+    folder_name VARCHAR(100) NOT NULL,
+    user_id INT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE files (
+    file_id SERIAL PRIMARY KEY,
+    file_name VARCHAR(100) NOT NULL,
+    file_type_id INT,
+    folder_id INT,
+    user_id INT,
+    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (file_type_id) REFERENCES file_types(file_type_id) ON DELETE SET NULL,
+    FOREIGN KEY (folder_id) REFERENCES folders(folder_id) ON DELETE SET NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE activity_log (
+    log_id SERIAL PRIMARY KEY,
+    user_id INT,
+    action VARCHAR(255) NOT NULL,
+    action_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE contact_info (
+    contact_id SERIAL PRIMARY KEY,
+    user_id INT,
+    phone VARCHAR(15),
+    address VARCHAR(255),
+    workplace VARCHAR(100),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- Создание функции триггера для записи действий
+CREATE OR REPLACE FUNCTION log_user_activity()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO activity_log (user_id, action) 
+    VALUES (NEW.user_id, TG_OP || ' on ' || TG_TABLE_NAME || ' for ID ' || COALESCE(NEW.file_id, NEW.folder_id) || ' at ' || CURRENT_TIMESTAMP);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Создание триггера для таблицы files
+CREATE TRIGGER files_activity_trigger
+AFTER INSERT OR UPDATE OR DELETE ON files
+FOR EACH ROW
+EXECUTE FUNCTION log_user_activity();
+
+-- Создание триггера для таблицы folders
+CREATE TRIGGER folders_activity_trigger
+AFTER INSERT OR UPDATE OR DELETE ON folders
+FOR EACH ROW
+EXECUTE FUNCTION log_user_activity();
+
+-- Создание ролей
+CREATE ROLE admin_role;
+CREATE ROLE employee_role;
+CREATE ROLE manager_role;
+
+-- Предоставление привилегий ролям
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA workspace TO admin_role; -- Полные права для администраторов
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA workspace TO employee_role; -- Ограниченные права для сотрудников
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA workspace TO manager_role; -- Права для менеджеров
+
+-- Создание пользователей
+CREATE USER alice WITH PASSWORD 'password123';
+CREATE USER bob WITH PASSWORD 'password123';
+CREATE USER charlie WITH PASSWORD 'password123';
+
+-- Назначение ролей пользователям
+GRANT admin_role TO alice;
+GRANT employee_role TO bob;
+GRANT manager_role TO charlie;
+
+-- Добавление пользователей в таблицу users
+INSERT INTO users (username, password, email, role) VALUES 
+('alice', 'hashed_password_1', 'alice@example.com', 'admin'),
+('bob', 'hashed_password_2', 'bob@example.com', 'employee'),
+('charlie', 'hashed_password_3', 'charlie@example.com', 'manager');
+
+--Получение текущего id пользователя
+CREATE OR REPLACE FUNCTION current_user_id()
+RETURNS INT AS $$
+DECLARE
+    user_id INT;
+BEGIN
+    SELECT u.user_id INTO user_id
+    FROM workspace.users u
+    WHERE u.username = session_user;  -- Используем session_user для получения имени текущего пользователя
+
+    RETURN user_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Включение Row Level Security для таблицы files
+ALTER TABLE workspace.files ENABLE ROW LEVEL SECURITY;
+
+-- Создание политики для ограничения доступа
+CREATE POLICY file_access_policy
+ON workspace.files
+FOR ALL
+USING (user_id = current_user_id());  -- Предполагается, что у вас есть функция для получения текущего пользователя
+
+-- Включение политики
+ALTER TABLE workspace.files FORCE ROW LEVEL SECURITY;
+
+-- Для таблицы folders
+ALTER TABLE workspace.folders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY folder_access_policy
+ON workspace.folders
+FOR ALL
+USING (user_id = current_user_id());
+
+ALTER TABLE workspace.folders FORCE ROW LEVEL SECURITY;
+
